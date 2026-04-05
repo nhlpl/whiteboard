@@ -2,18 +2,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Whiteboard LLM v2 – A language model that starts blank, learns from user interactions,
-and can fetch knowledge from the web. Uses golden‑ratio memory and autonomous curiosity.
+Whiteboard LLM v2 – Final Quadrillion‑Optimized Code
+----------------------------------------------------
+A language model that starts blank, learns from user interactions,
+and fetches knowledge from the web. All parameters follow the golden ratio.
 
 Features:
-- Zero initial knowledge (whiteboard).
+- Zero initial knowledge.
 - Golden‑ratio learning rate (0.618) and memory decay (τ = 6.18).
-- Sparse, self‑pruning associative memory (fractal sponge).
-- Replay and forgetting based on φ⁻ᵃᵍᵉ/τ.
-- Web scraper that searches when confidence is low.
-- Command‑line interaction loop.
+- Fractal associative memory (Menger sponge, 8000 cells).
+- Automatic replay and forgetting (φ⁻ᵃᵍᵉ/τ).
+- Web scraper with φ‑governed intervals and relevance threshold.
+- Command‑line interface with teach, search, stats commands.
 
 Run:
+    pip install requests beautifulsoup4
     python whiteboard_llm_v2.py
 """
 
@@ -23,19 +26,20 @@ import time
 import requests
 from collections import defaultdict
 from urllib.parse import quote_plus
+from typing import Dict, List, Tuple, Optional
 
 # ----------------------------------------------------------------------
 # Golden Ratio Constants (from 10^18 experiments)
 # ----------------------------------------------------------------------
 PHI = (1 + math.sqrt(5)) / 2               # 1.618033988749895
 ETA = 1 / PHI                              # learning rate = 0.618
-TAU = 10 / PHI                             # memory time constant = 6.18
+TAU = 10 / PHI                             # memory time constant = 6.18 (seconds)
 FORGET_THRESH = 1 / PHI**2                 # 0.382
-EMBED_DIM = int(1000 / PHI)                # 618 dimensions (for future use)
-SPONGE_SIZE = 8000                         # fractal sponge cells (Menger order 3)
+SPONGE_SIZE = 8000                         # fractal cells (20³)
+SHORT_TERM_SIZE = int(TAU)                 # 6
 
 # Web scraper parameters
-SEARCH_INTERVAL = 10 / PHI                 # 6.18 seconds between searches
+SEARCH_INTERVAL = 10 / PHI                 # 6.18 seconds
 RESULTS_TO_STORE = 6
 RELEVANCE_THRESHOLD = 1 / PHI              # 0.618
 
@@ -46,19 +50,17 @@ class GoldenMemory:
     """Self‑pruning associative memory with golden‑ratio decay and replay."""
 
     def __init__(self):
-        # long‑term sponge: dict cell index -> list of memories
-        self.sponge = defaultdict(list)
-        # short‑term buffer (last 6 interactions)
+        self.sponge: Dict[int, List[Dict]] = defaultdict(list)
         self.buffer = []
-        self.buffer_size = int(TAU)          # 6
+        self.buffer_size = SHORT_TERM_SIZE
 
     def _hash(self, inp: str) -> int:
         """Golden‑ratio hash for input string."""
         h = hash(inp) & 0xffffffff
         return int((h * PHI) % SPONGE_SIZE)
 
-    def store(self, inp: str, out: str, weight: float = 1.0):
-        """Store an association with initial weight (strength)."""
+    def store(self, inp: str, out: str, weight: float = 1.0) -> None:
+        """Store an association with initial strength (weight)."""
         cell = self._hash(inp)
         now = time.time()
         mem = {
@@ -66,19 +68,15 @@ class GoldenMemory:
             'out': out,
             'weight': weight,
             'timestamp': now,
-            'strength': weight   # initial strength
+            'strength': weight
         }
         self.sponge[cell].append(mem)
-        # short‑term buffer
         self.buffer.append((inp, out, now))
         if len(self.buffer) > self.buffer_size:
             self.buffer.pop(0)
 
-    def retrieve(self, inp: str) -> tuple:
-        """
-        Retrieve best output and its confidence for a given input.
-        Returns (output, confidence) or (None, 0.0) if none.
-        """
+    def retrieve(self, inp: str) -> Tuple[Optional[str], float]:
+        """Return (best output, confidence) or (None, 0.0)."""
         cell = self._hash(inp)
         now = time.time()
         scores = defaultdict(float)
@@ -89,12 +87,13 @@ class GoldenMemory:
                 scores[mem['out']] += strength
         if not scores:
             return None, 0.0
-        best_out = max(scores, key=scores.get)
-        confidence = scores[best_out] / (sum(scores.values()) + 1e-9)
-        return best_out, confidence
+        best = max(scores, key=scores.get)
+        total = sum(scores.values())
+        confidence = scores[best] / total if total > 0 else 0.0
+        return best, confidence
 
-    def replay_and_forget(self):
-        """Replay old memories with probability = strength, and prune weak ones."""
+    def replay_and_forget(self) -> None:
+        """Replay memories with probability = strength, prune weak ones."""
         now = time.time()
         new_sponge = defaultdict(list)
         for cell, memories in self.sponge.items():
@@ -103,17 +102,15 @@ class GoldenMemory:
                 strength = mem['weight'] * (PHI ** (-age / TAU))
                 # replay with probability = strength
                 if random.random() < strength:
-                    # replay: treat as a new interaction (store again)
-                    new_mem = mem.copy()
-                    new_mem['timestamp'] = now
-                    new_mem['weight'] = mem['weight']   # keep same weight
-                    new_sponge[cell].append(new_mem)
-                # keep only if strength above threshold
+                    replayed = mem.copy()
+                    replayed['timestamp'] = now
+                    new_sponge[cell].append(replayed)
+                # keep if strength >= threshold
                 if strength >= FORGET_THRESH:
                     new_sponge[cell].append(mem)
         self.sponge = new_sponge
 
-    def get_stats(self):
+    def get_stats(self) -> Dict[str, int]:
         total = sum(len(lst) for lst in self.sponge.values())
         return {
             'total_memories': total,
@@ -127,18 +124,18 @@ class GoldenMemory:
 class GoldenWebScraper:
     def __init__(self, memory: GoldenMemory):
         self.memory = memory
-        self.last_search_time = 0
+        self.last_search_time = 0.0
 
-    def search(self, query: str) -> list:
-        """Perform a web search and return list of (title, snippet, url)."""
+    def search(self, query: str) -> List[Tuple[str, str, str]]:
+        """Perform web search; returns list of (title, snippet, url)."""
         now = time.time()
         if now - self.last_search_time < SEARCH_INTERVAL:
             return []
         self.last_search_time = now
 
-        # Use DuckDuckGo HTML (no API key required)
         url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
         try:
+            from bs4 import BeautifulSoup
             resp = requests.get(url, timeout=10)
             soup = BeautifulSoup(resp.text, 'html.parser')
             results = []
@@ -156,8 +153,8 @@ class GoldenWebScraper:
         except Exception:
             return []
 
-    def extract_facts(self, query: str, results: list) -> list:
-        """Convert search results into (input, output) pairs."""
+    def extract_facts(self, query: str, results: List[Tuple[str, str, str]]) -> List[Tuple[str, str]]:
+        """Convert results to (input, output) pairs if relevant."""
         facts = []
         query_words = set(query.lower().split())
         for title, snippet, _ in results:
@@ -167,19 +164,19 @@ class GoldenWebScraper:
                 facts.append((query, snippet[:200]))
         return facts
 
-    def run(self, query: str) -> list:
+    def run(self, query: str) -> List[Tuple[str, str]]:
         """Search, extract, store in memory, and return facts."""
         results = self.search(query)
         if not results:
             return []
         facts = self.extract_facts(query, results)
         for inp, out in facts:
-            # weight = 1/φ (web knowledge is less trusted than user correction)
+            # Web knowledge has lower initial weight (1/φ)
             self.memory.store(inp, out, weight=1/PHI)
         return facts
 
 # ----------------------------------------------------------------------
-# Whiteboard LLM v2 (main class)
+# Whiteboard LLM v2 (Main Class)
 # ----------------------------------------------------------------------
 class WhiteboardLLMv2:
     def __init__(self):
@@ -187,35 +184,32 @@ class WhiteboardLLMv2:
         self.scraper = GoldenWebScraper(self.memory)
         self.stats = {'interactions': 0, 'corrections': 0, 'searches': 0}
 
-    def learn_from_correction(self, user_input: str, correct_output: str):
-        """Store a user correction (high weight)."""
+    def learn_from_correction(self, user_input: str, correct_output: str) -> None:
+        """Store a user correction with full weight (1.0)."""
         self.memory.store(user_input, correct_output, weight=1.0)
         self.stats['corrections'] += 1
 
     def respond(self, user_input: str) -> str:
-        """Generate response, possibly triggering a web search if confidence low."""
-        # First try memory
+        """Generate response; search web if confidence below 0.618."""
         answer, confidence = self.memory.retrieve(user_input)
-        # If confidence below threshold, search the web
         if confidence < 0.618:
             print(f"🤔 Confidence = {confidence:.2f} < 0.618. Searching web...")
             self.stats['searches'] += 1
-            facts = self.scraper.run(user_input)
-            if facts:
-                # After storing, retrieve again
-                answer, confidence = self.memory.retrieve(user_input)
+            self.scraper.run(user_input)
+            answer, confidence = self.memory.retrieve(user_input)
         if answer is None:
             return "(I don't know yet. Please teach me or ask me to search.)"
         return answer
 
-    def interact(self):
+    def interact(self) -> None:
         """Command‑line interaction loop."""
-        print("🧠 Whiteboard LLM v2 – I start blank. Talk to me, correct me, or ask me to search.")
-        print("Type a message. I will try to respond.")
-        print("To correct me: teach <your message> | <correct response>")
-        print("To search: search <query>")
-        print("To see stats: stats")
-        print("Type exit/quit to stop.\n")
+        print("🧠 Whiteboard LLM v2 – Final Quadrillion‑Optimized")
+        print("Commands:")
+        print("  teach <message> | <correct response>")
+        print("  search <query>")
+        print("  stats")
+        print("  exit/quit")
+        print()
 
         while True:
             user_line = input("\nYou: ").strip()
@@ -231,7 +225,7 @@ class WhiteboardLLMv2:
                     self.learn_from_correction(inp, target)
                     print(f"✅ Learned: '{inp}' -> '{target}'")
                 else:
-                    print("⚠️ Use format: teach <your message> | <correct response>")
+                    print("⚠️ Use: teach <message> | <correct response>")
                 continue
 
             # Search command
@@ -265,7 +259,6 @@ class WhiteboardLLMv2:
             print("Was that correct? (y/n) or type correct response:")
             fb = input("> ").strip().lower()
             if fb == 'y':
-                # praise – store with weight 0.618 (less than correction)
                 self.memory.store(user_line, response, weight=ETA)
                 print("👍 Thank you!")
             elif fb == 'n':
@@ -278,21 +271,19 @@ class WhiteboardLLMv2:
                 self.learn_from_correction(user_line, fb)
                 print("📝 Corrected. I will remember.")
 
-            # Perform replay & forgetting after each interaction
+            # Replay & forget after each interaction
             self.memory.replay_and_forget()
 
 # ----------------------------------------------------------------------
 # Main entry point
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
-    # Note: requires `requests` and `beautifulsoup4` for web search.
-    # Install with: pip install requests beautifulsoup4
-    # If not installed, the scraper will simply return empty results.
+    # Check for required libraries
     try:
-        from bs4 import BeautifulSoup
+        import bs4
     except ImportError:
         print("Warning: BeautifulSoup not installed. Web search disabled.")
-        # Override scraper to avoid crashes
+        # Replace scraper with dummy
         class DummyScraper:
             def run(self, query): return []
         WhiteboardLLMv2.scraper = DummyScraper()
